@@ -69,7 +69,7 @@ static int s_gnss_tx_gpio = GNSS_DEFAULT_TX_PIN;
 static int s_gnss_rx_gpio = GNSS_DEFAULT_RX_PIN;
 static bool s_gnss_running = false;
 static bool s_gnss_uart_driver_installed = false;
-static TaskHandle_t s_gnss_task_handle = NULL;
+static volatile TaskHandle_t s_gnss_task_handle = NULL;
 static SemaphoreHandle_t s_gnss_lock = NULL;
 static gnss_sentence_callback_t s_sentence_cb = NULL;
 static void* s_sentence_cb_ctx = NULL;
@@ -548,8 +548,6 @@ esp_err_t gnss_start_with_config(int baud_rate, int tx_gpio, int rx_gpio, bool p
 
 esp_err_t gnss_stop(void)
 {
-  TaskHandle_t task_to_delete = NULL;
-
   if (!gnss_ensure_lock())
   {
     return ESP_ERR_NO_MEM;
@@ -566,9 +564,24 @@ esp_err_t gnss_stop(void)
     return ESP_OK;
   }
 
+  /* Signal gnss_task() to leave its read loop, then release the lock so it can
+   * finish the in-flight uart_read_bytes() and self-delete. */
   s_gnss_running = false;
-  task_to_delete = s_gnss_task_handle;
-  s_gnss_task_handle = NULL;
+  xSemaphoreGive(s_gnss_lock);
+
+  /* Wait for the task to actually exit before tearing down the UART driver.
+   * Deleting the driver while the task is still blocked in uart_read_bytes()
+   * frees structures the read references and reboots the device. The task uses
+   * a 30 ms read timeout, so it observes the flag and exits well within 500 ms. */
+  for (int waited_ms = 0; s_gnss_task_handle != NULL && waited_ms < 500; waited_ms += 10)
+  {
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+
+  if (xSemaphoreTake(s_gnss_lock, pdMS_TO_TICKS(200)) != pdTRUE)
+  {
+    return ESP_ERR_TIMEOUT;
+  }
 
   if (s_gnss_uart_driver_installed)
   {
@@ -577,8 +590,6 @@ esp_err_t gnss_stop(void)
   }
 
   xSemaphoreGive(s_gnss_lock);
-
-  (void)task_to_delete;
 
   s_gnss_state.initialized = false;
   snprintf(s_gnss_state.status_text, sizeof(s_gnss_state.status_text), "%s", "Stopped");

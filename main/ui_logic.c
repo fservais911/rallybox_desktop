@@ -339,7 +339,23 @@ static ui_stream_buffer_t s_gnss_stream = { 0 };
 static ui_line_window_t s_gnss_window = { 0 };
 static char s_gnss_render_buf[UART_MONITOR_LINES * (GNSS_DUMP_LINE_MAX + 1)] = { 0 };
 static bool s_gnss_listening = false;
+static lv_obj_t* s_gnss_baud_dropdown = NULL;
+static lv_obj_t* s_gnss_tx_dropdown = NULL;
+static lv_obj_t* s_gnss_rx_dropdown = NULL;
 static volatile uint32_t s_gnss_rx_count = 0;
+
+// Selectable baud rates for the GNSS dropdown (no on-screen keyboard available).
+static const int s_gnss_baud_values[] = {
+    4800, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600
+};
+#define GNSS_BAUD_OPTIONS_STR "4800\n9600\n19200\n38400\n57600\n115200\n230400\n460800\n921600"
+#define GNSS_BAUD_DEFAULT_INDEX 5  /* 115200 */
+
+// Selectable GPIO numbers for TX/RX (matches the 0..54 range validated below).
+#define GNSS_GPIO_MIN 0
+#define GNSS_GPIO_MAX 54
+// Options string "0\n1\n...\n54": 55 entries, up to 3 chars each (incl. newline).
+#define GNSS_GPIO_OPTIONS_BUF_SIZE ((GNSS_GPIO_MAX - GNSS_GPIO_MIN + 1) * 3 + 1)
 static volatile uint32_t s_bt_rx_count = 0;
 static char s_gnss_status_text[96] = "Idle. Enter UART settings, then press START";
 static lv_timer_t* s_gnss_dump_timer = NULL;
@@ -2080,6 +2096,50 @@ static void ui_refresh_bluetooth_dump(void)
 #endif
 }
 
+// Replace an EEZ-generated textarea with a styled dropdown at the same parent,
+// position and size (no on-screen keyboard is available to type values).
+static lv_obj_t* ui_gnss_dropdown_in_place(lv_obj_t* textarea, const char* options)
+{
+    lv_obj_t* parent;
+    lv_obj_t* dropdown;
+
+    if (textarea == NULL)
+    {
+        return NULL;
+    }
+
+    parent = lv_obj_get_parent(textarea);
+    lv_obj_add_flag(textarea, LV_OBJ_FLAG_HIDDEN);
+
+    dropdown = lv_dropdown_create(parent);
+    lv_dropdown_set_options(dropdown, options);
+    lv_obj_set_pos(dropdown, lv_obj_get_x(textarea), lv_obj_get_y(textarea));
+    lv_obj_set_size(dropdown, lv_obj_get_width(textarea), lv_obj_get_height(textarea));
+    lv_obj_set_style_bg_color(dropdown, lv_color_hex(UI_COLOR_SURFACE), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_text_color(dropdown, lv_color_hex(UI_COLOR_TEXT), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_color(dropdown, lv_color_hex(UI_COLOR_BORDER), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_border_width(dropdown, 1, LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_radius(dropdown, 10, LV_PART_MAIN | LV_STATE_DEFAULT);
+
+    return dropdown;
+}
+
+// Build the "0\n1\n...\n54" options string for a GPIO dropdown into buf.
+static void ui_gnss_build_gpio_options(char* buf, size_t buf_size)
+{
+    size_t pos = 0;
+    for (int gpio = GNSS_GPIO_MIN; gpio <= GNSS_GPIO_MAX && pos < buf_size; gpio++)
+    {
+        int written = snprintf(buf + pos, buf_size - pos,
+                               (gpio == GNSS_GPIO_MIN) ? "%d" : "\n%d", gpio);
+        if (written <= 0)
+        {
+            break;
+        }
+        pos += (size_t)written;
+    }
+}
+
 static void action_gnss_start_stop(lv_event_t* e)
 {
     int baud_rate;
@@ -2110,14 +2170,22 @@ static void action_gnss_start_stop(lv_event_t* e)
         return;
     }
 
-    if (objects.gnss_baud_input == NULL || objects.gnss_tx_input == NULL || objects.gnss_rx_input == NULL)
+    if (s_gnss_baud_dropdown == NULL || s_gnss_tx_dropdown == NULL || s_gnss_rx_dropdown == NULL)
     {
         return;
     }
 
-    baud_rate = atoi(lv_textarea_get_text(objects.gnss_baud_input));
-    tx_gpio = atoi(lv_textarea_get_text(objects.gnss_tx_input));
-    rx_gpio = atoi(lv_textarea_get_text(objects.gnss_rx_input));
+    {
+        uint16_t baud_index = lv_dropdown_get_selected(s_gnss_baud_dropdown);
+        if (baud_index >= (sizeof(s_gnss_baud_values) / sizeof(s_gnss_baud_values[0])))
+        {
+            baud_index = GNSS_BAUD_DEFAULT_INDEX;
+        }
+        baud_rate = s_gnss_baud_values[baud_index];
+    }
+    // GPIO dropdown options are "0".."54", so the selected index is the GPIO number.
+    tx_gpio = GNSS_GPIO_MIN + (int)lv_dropdown_get_selected(s_gnss_tx_dropdown);
+    rx_gpio = GNSS_GPIO_MIN + (int)lv_dropdown_get_selected(s_gnss_rx_dropdown);
 
     if (baud_rate < 1200 || baud_rate > 921600)
     {
@@ -7363,56 +7431,57 @@ void ui_logic_init_events(void)
         lv_label_set_text(objects.gnss_status_label, s_gnss_status_text);
     }
 
-    if (objects.gnss_baud_input)
+    // No on-screen keyboard is available, so the baud rate and TX/RX GPIO inputs are
+    // replaced with dropdowns. Defaults match the EEZ-generated textareas (115200, TX 51, RX 50)
+    // and are overridden below from the saved GNSS config when available.
     {
-#if CONFIG_RALLYBOX_GNSS_ENABLED
-        int gnss_baud = 0;
-        int gnss_tx = 0;
-        int gnss_rx = 0;
-        char cfg_text[16];
-#endif
+        static char gpio_options[GNSS_GPIO_OPTIONS_BUF_SIZE];
+        uint16_t baud_index = GNSS_BAUD_DEFAULT_INDEX;
+        int tx_gpio_sel = 51;
+        int rx_gpio_sel = 50;
 
-        lv_obj_add_event_cb(objects.gnss_baud_input, action_show_keyboard, LV_EVENT_PRESSED, NULL);
-        lv_obj_add_event_cb(objects.gnss_baud_input, action_show_keyboard, LV_EVENT_FOCUSED, NULL);
-        lv_textarea_set_one_line(objects.gnss_baud_input, true);
-        lv_textarea_set_accepted_chars(objects.gnss_baud_input, "0123456789");
-        ui_style_input(objects.gnss_baud_input);
+        ui_gnss_build_gpio_options(gpio_options, sizeof(gpio_options));
 
-#if CONFIG_RALLYBOX_GNSS_ENABLED
-        if (gnss_get_config(&gnss_baud, &gnss_tx, &gnss_rx) == ESP_OK)
+        if (s_gnss_baud_dropdown == NULL && objects.gnss_baud_input)
         {
-            snprintf(cfg_text, sizeof(cfg_text), "%d", gnss_baud);
-            lv_textarea_set_text(objects.gnss_baud_input, cfg_text);
-            if (objects.gnss_tx_input)
+            s_gnss_baud_dropdown = ui_gnss_dropdown_in_place(objects.gnss_baud_input, GNSS_BAUD_OPTIONS_STR);
+        }
+        if (s_gnss_tx_dropdown == NULL && objects.gnss_tx_input)
+        {
+            s_gnss_tx_dropdown = ui_gnss_dropdown_in_place(objects.gnss_tx_input, gpio_options);
+        }
+        if (s_gnss_rx_dropdown == NULL && objects.gnss_rx_input)
+        {
+            s_gnss_rx_dropdown = ui_gnss_dropdown_in_place(objects.gnss_rx_input, gpio_options);
+        }
+
+#if CONFIG_RALLYBOX_GNSS_ENABLED
+        {
+            int gnss_baud = 0;
+            int gnss_tx = 0;
+            int gnss_rx = 0;
+
+            if (gnss_get_config(&gnss_baud, &gnss_tx, &gnss_rx) == ESP_OK)
             {
-                snprintf(cfg_text, sizeof(cfg_text), "%d", gnss_tx);
-                lv_textarea_set_text(objects.gnss_tx_input, cfg_text);
-            }
-            if (objects.gnss_rx_input)
-            {
-                snprintf(cfg_text, sizeof(cfg_text), "%d", gnss_rx);
-                lv_textarea_set_text(objects.gnss_rx_input, cfg_text);
+                const int baud_count = (int)(sizeof(s_gnss_baud_values) / sizeof(s_gnss_baud_values[0]));
+                for (int i = 0; i < baud_count; i++)
+                {
+                    if (s_gnss_baud_values[i] == gnss_baud)
+                    {
+                        baud_index = (uint16_t)i;
+                        break;
+                    }
+                }
+                if (gnss_tx >= GNSS_GPIO_MIN && gnss_tx <= GNSS_GPIO_MAX) tx_gpio_sel = gnss_tx;
+                if (gnss_rx >= GNSS_GPIO_MIN && gnss_rx <= GNSS_GPIO_MAX) rx_gpio_sel = gnss_rx;
             }
         }
 #endif
-    }
 
-    if (objects.gnss_tx_input)
-    {
-        lv_obj_add_event_cb(objects.gnss_tx_input, action_show_keyboard, LV_EVENT_PRESSED, NULL);
-        lv_obj_add_event_cb(objects.gnss_tx_input, action_show_keyboard, LV_EVENT_FOCUSED, NULL);
-        lv_textarea_set_one_line(objects.gnss_tx_input, true);
-        lv_textarea_set_accepted_chars(objects.gnss_tx_input, "0123456789");
-        ui_style_input(objects.gnss_tx_input);
-    }
-
-    if (objects.gnss_rx_input)
-    {
-        lv_obj_add_event_cb(objects.gnss_rx_input, action_show_keyboard, LV_EVENT_PRESSED, NULL);
-        lv_obj_add_event_cb(objects.gnss_rx_input, action_show_keyboard, LV_EVENT_FOCUSED, NULL);
-        lv_textarea_set_one_line(objects.gnss_rx_input, true);
-        lv_textarea_set_accepted_chars(objects.gnss_rx_input, "0123456789");
-        ui_style_input(objects.gnss_rx_input);
+        if (s_gnss_baud_dropdown) lv_dropdown_set_selected(s_gnss_baud_dropdown, baud_index);
+        // GPIO options are "0".."54" so the option index equals the GPIO number.
+        if (s_gnss_tx_dropdown) lv_dropdown_set_selected(s_gnss_tx_dropdown, (uint16_t)(tx_gpio_sel - GNSS_GPIO_MIN));
+        if (s_gnss_rx_dropdown) lv_dropdown_set_selected(s_gnss_rx_dropdown, (uint16_t)(rx_gpio_sel - GNSS_GPIO_MIN));
     }
 
     if (objects.gnss_start_stop_button)
