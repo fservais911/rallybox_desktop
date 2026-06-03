@@ -412,6 +412,7 @@ static lv_obj_t* s_settings_filter_stationary_checkbox = NULL;
 static lv_obj_t* s_settings_filter_impossible_checkbox = NULL;
 static lv_obj_t* s_settings_stationary_hint_label = NULL;
 static lv_obj_t* s_settings_impossible_hint_label = NULL;
+static lv_obj_t* s_settings_hw_gnss_value = NULL;
 static lv_obj_t* s_settings_stationary_radius_value = NULL;
 static bool s_settings_ui_syncing = false;
 static uint8_t s_settings_stationary_radius_m = 3;
@@ -4529,6 +4530,27 @@ static void ui_style_checkbox(lv_obj_t* checkbox)
     lv_obj_set_style_border_color(checkbox, lv_color_hex(UI_COLOR_ACCENT), LV_PART_INDICATOR | LV_STATE_CHECKED);
 }
 
+// Build the (live) GNSS hardware-config line: UART port, baud, TX/RX GPIO.
+static void ui_build_gnss_hw_text(char* buf, size_t buf_size)
+{
+#if CONFIG_RALLYBOX_GNSS_ENABLED
+    int baud = 0;
+    int tx = 0;
+    int rx = 0;
+
+    if (gnss_get_config(&baud, &tx, &rx) == ESP_OK)
+    {
+        snprintf(buf, buf_size, "UART%d  -  %d baud  -  TX %d  RX %d%s",
+                 CONFIG_RALLYBOX_GNSS_UART_PORT, baud, tx, rx,
+                 gnss_is_running() ? "  (listening)" : "");
+        return;
+    }
+    snprintf(buf, buf_size, "UART%d  -  configuration unavailable", CONFIG_RALLYBOX_GNSS_UART_PORT);
+#else
+    snprintf(buf, buf_size, "Disabled in firmware configuration");
+#endif
+}
+
 static void ui_refresh_settings_controls(void)
 {
     gps_points_filter_config_t config = { 0 };
@@ -4536,6 +4558,13 @@ static void ui_refresh_settings_controls(void)
     char rallybox_id[32];
     char stationary_hint[160];
     char threshold_text[24];
+    char gnss_hw_text[96];
+
+    if (s_settings_hw_gnss_value)
+    {
+        ui_build_gnss_hw_text(gnss_hw_text, sizeof(gnss_hw_text));
+        lv_label_set_text(s_settings_hw_gnss_value, gnss_hw_text);
+    }
 
     ui_get_rallybox_id(rallybox_id, sizeof(rallybox_id));
     if (s_settings_rallybox_id_value)
@@ -4674,6 +4703,36 @@ static void ui_settings_stationary_threshold_cb(lv_event_t* e)
     }
 
     ui_refresh_settings_controls();
+}
+
+// Add one hardware-info row (accent name line + wrapped detail line) to a settings
+// card. Returns the detail label so callers can refresh its text later.
+static lv_obj_t* ui_settings_add_hw_row(lv_obj_t* parent, const char* name, const char* detail)
+{
+    lv_obj_t* row = lv_obj_create(parent);
+    lv_obj_t* name_label;
+    lv_obj_t* detail_label;
+
+    lv_obj_set_size(row, LV_PCT(100), LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_style_pad_row(row, 2, 0);
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_COLUMN);
+
+    name_label = lv_label_create(row);
+    lv_label_set_text(name_label, name);
+    lv_obj_set_style_text_font(name_label, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(name_label, lv_color_hex(UI_COLOR_ACCENT), 0);
+
+    detail_label = lv_label_create(row);
+    lv_obj_set_width(detail_label, LV_PCT(100));
+    lv_label_set_long_mode(detail_label, LV_LABEL_LONG_WRAP);
+    lv_label_set_text(detail_label, detail);
+    lv_obj_set_style_text_font(detail_label, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(detail_label, lv_color_hex(UI_COLOR_TEXT), 0);
+
+    return detail_label;
 }
 
 lv_obj_t* create_settings_screen(lv_obj_t* parent)
@@ -4914,6 +4973,60 @@ lv_obj_t* create_settings_screen(lv_obj_t* parent)
     lv_label_set_long_mode(s_settings_impossible_hint_label, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_font(s_settings_impossible_hint_label, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(s_settings_impossible_hint_label, lv_color_hex(UI_COLOR_MUTED), 0);
+
+    // ── Hardware configuration (read-only pinout / port overview) ───────────
+    {
+        lv_obj_t* hw_card;
+        lv_obj_t* hw_title;
+        lv_obj_t* hw_hint;
+        char buf[160];
+#if CONFIG_RALLYBOX_RACEBOX_ENABLED
+        const char* bt_target = CONFIG_RALLYBOX_RACEBOX_TARGET_NAME;
+#else
+        const char* bt_target = "n/a";
+#endif
+
+        hw_card = lv_obj_create(content);
+        lv_obj_set_size(hw_card, LV_PCT(100), LV_SIZE_CONTENT);
+        ui_style_surface(hw_card, lv_color_hex(UI_COLOR_SURFACE), 18);
+        lv_obj_set_style_pad_all(hw_card, 18, 0);
+        lv_obj_set_style_pad_row(hw_card, 10, 0);
+        lv_obj_set_flex_flow(hw_card, LV_FLEX_FLOW_COLUMN);
+
+        hw_title = lv_label_create(hw_card);
+        lv_label_set_text(hw_title, "Hardware Configuration");
+        lv_obj_set_style_text_font(hw_title, &lv_font_montserrat_18, 0);
+        lv_obj_set_style_text_color(hw_title, lv_color_hex(UI_COLOR_TEXT), 0);
+
+        hw_hint = lv_label_create(hw_card);
+        lv_obj_set_width(hw_hint, LV_PCT(100));
+        lv_label_set_long_mode(hw_hint, LV_LABEL_LONG_WRAP);
+        lv_label_set_text(hw_hint, "GPIO and port assignments in use by each subsystem.");
+        lv_obj_set_style_text_font(hw_hint, &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(hw_hint, lv_color_hex(UI_COLOR_MUTED), 0);
+
+        snprintf(buf, sizeof(buf),
+            "SDMMC 4-bit @ /sdcard  -  CLK %d  CMD %d  D0 %d  D1 %d  D2 %d  D3 %d  -  Power GPIO %d",
+            SD1_PIN_CLK, SD1_PIN_CMD, SD1_PIN_D0, SD1_PIN_D1, SD1_PIN_D2, SD1_PIN_D3,
+            SD1_CONTROL_PIN);
+        ui_settings_add_hw_row(hw_card, "SD Card 1", buf);
+
+        snprintf(buf, sizeof(buf),
+            "SDSPI (SPI3) @ /sdcard2  -  CLK %d  MOSI %d  MISO %d  CS %d  -  Power GPIO %d",
+            SD2_PIN_CLK, SD2_PIN_MOSI, SD2_PIN_MISO, SD2_PIN_CS, SD2_CONTROL_PIN);
+        ui_settings_add_hw_row(hw_card, "SD Card 2", buf);
+
+        snprintf(buf, sizeof(buf),
+            "BLE via ESP-Hosted SDIO  -  CMD %d  CLK %d  D0 %d  D1 %d  D2 %d  D3 %d  -  Reset %d  -  Target \"%s\"",
+            CONFIG_ESP_HOSTED_SDIO_PIN_CMD, CONFIG_ESP_HOSTED_SDIO_PIN_CLK,
+            CONFIG_ESP_HOSTED_SDIO_PIN_D0, CONFIG_ESP_HOSTED_SDIO_PIN_D1,
+            CONFIG_ESP_HOSTED_SDIO_PIN_D2, CONFIG_ESP_HOSTED_SDIO_PIN_D3,
+            CONFIG_ESP_HOSTED_SDIO_GPIO_RESET_SLAVE, bt_target);
+        ui_settings_add_hw_row(hw_card, "Bluetooth", buf);
+
+        ui_build_gnss_hw_text(buf, sizeof(buf));
+        s_settings_hw_gnss_value = ui_settings_add_hw_row(hw_card, "GNSS", buf);
+    }
 
     ui_refresh_settings_controls();
     return cont;
