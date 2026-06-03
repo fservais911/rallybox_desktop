@@ -1,6 +1,9 @@
 # ESP-IDF build outputs
 build/
 build-*/
+
+# ESP-IDF Component Manager download cache (regenerated from dependencies.lock)
+managed_components/
 *.map
 *.elf
 *.bin
