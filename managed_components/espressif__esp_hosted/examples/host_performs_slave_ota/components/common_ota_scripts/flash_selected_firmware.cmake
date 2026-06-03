@@ -31,60 +31,24 @@ message(STATUS "Path: ${SELECTED_FIRMWARE_PATH}")
 message(STATUS "Offset: ${SLAVE_FW_OFFSET}")
 message(STATUS "-----------------------------------------------------")
 
-set(SERIAL_PORT "")
-set(SERIAL_BAUD "2000000")
-
-if(DEFINED ENV{ESPPORT} AND NOT "$ENV{ESPPORT}" STREQUAL "")
-    set(SERIAL_PORT "$ENV{ESPPORT}")
-elseif(DEFINED ENV{IDF_PORT} AND NOT "$ENV{IDF_PORT}" STREQUAL "")
-    set(SERIAL_PORT "$ENV{IDF_PORT}")
-endif()
-
-if(DEFINED ENV{ESPBAUD} AND NOT "$ENV{ESPBAUD}" STREQUAL "")
-    set(SERIAL_BAUD "$ENV{ESPBAUD}")
-elseif(DEFINED ENV{IDF_BAUD} AND NOT "$ENV{IDF_BAUD}" STREQUAL "")
-    set(SERIAL_BAUD "$ENV{IDF_BAUD}")
-endif()
-
-if(NOT "${SERIAL_PORT}" STREQUAL "")
-    message(STATUS "Using serial port: ${SERIAL_PORT}")
-endif()
-message(STATUS "Using serial baud: ${SERIAL_BAUD}")
-
 # Check if file exists
 if(NOT EXISTS "${SELECTED_FIRMWARE_PATH}")
     message(FATAL_ERROR "❌ ERROR: Selected firmware file not found: ${SELECTED_FIRMWARE_PATH}")
 endif()
 
-# Execute esptool with explicit serial settings when available
-if(NOT "${SERIAL_PORT}" STREQUAL "")
-    execute_process(
-        COMMAND ${PYTHON} -m esptool
-            -p ${SERIAL_PORT}
-            -b ${SERIAL_BAUD}
-            write_flash
-            --force
-            ${SLAVE_FW_OFFSET} "${SELECTED_FIRMWARE_PATH}"
-        RESULT_VARIABLE FLASH_RESULT
-        OUTPUT_VARIABLE FLASH_OUTPUT
-        ERROR_VARIABLE FLASH_ERROR
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_STRIP_TRAILING_WHITESPACE
-    )
-else()
-    execute_process(
-        COMMAND ${PYTHON} -m esptool
-            -b ${SERIAL_BAUD}
-            write_flash
-            --force
-            ${SLAVE_FW_OFFSET} "${SELECTED_FIRMWARE_PATH}"
-        RESULT_VARIABLE FLASH_RESULT
-        OUTPUT_VARIABLE FLASH_OUTPUT
-        ERROR_VARIABLE FLASH_ERROR
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_STRIP_TRAILING_WHITESPACE
-    )
-endif()
+# Execute esptool (this will inherit the port from the parent build process)
+execute_process(
+    COMMAND ${PYTHON} -m esptool
+        -b 2000000
+        write_flash
+        --force
+        ${SLAVE_FW_OFFSET} "${SELECTED_FIRMWARE_PATH}"
+    RESULT_VARIABLE FLASH_RESULT
+    OUTPUT_VARIABLE FLASH_OUTPUT
+    ERROR_VARIABLE FLASH_ERROR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_STRIP_TRAILING_WHITESPACE
+)
 
 if(FLASH_OUTPUT)
     message(STATUS "${FLASH_OUTPUT}")

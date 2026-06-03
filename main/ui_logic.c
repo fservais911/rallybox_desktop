@@ -74,7 +74,7 @@
 #endif
 #include "system_monitor.h"         ///< System monitoring/status
 #include "debug_flags.h"
-#include "mbedtls/sha256.h"
+#include "psa/crypto.h"
 #if CONFIG_RALLYBOX_RACEBOX_ENABLED
 #include "racebox.h"                ///< RaceBox BLE scan/connect APIs
 #endif
@@ -3928,7 +3928,7 @@ static bool ui_compute_partition_sha256_hex(const esp_partition_t* partition, si
 {
     uint8_t* chunk = NULL;
     uint8_t digest[32];
-    mbedtls_sha256_context sha_ctx;
+    psa_hash_operation_t sha_op = PSA_HASH_OPERATION_INIT;
     size_t offset = 0;
     bool success = false;
 
@@ -3944,8 +3944,11 @@ static bool ui_compute_partition_sha256_hex(const esp_partition_t* partition, si
         return false;
     }
 
-    mbedtls_sha256_init(&sha_ctx);
-    mbedtls_sha256_starts(&sha_ctx, 0);
+    if (psa_hash_setup(&sha_op, PSA_ALG_SHA_256) != PSA_SUCCESS)
+    {
+        ESP_LOGW(TAG, "Failed to initialise SHA-256 context");
+        goto cleanup;
+    }
 
     while (offset < image_size)
     {
@@ -3961,12 +3964,21 @@ static bool ui_compute_partition_sha256_hex(const esp_partition_t* partition, si
             goto cleanup;
         }
 
-        mbedtls_sha256_update(&sha_ctx, chunk, chunk_len);
+        if (psa_hash_update(&sha_op, chunk, chunk_len) != PSA_SUCCESS)
+        {
+            ESP_LOGW(TAG, "SHA-256 update failed at offset %u", (unsigned)offset);
+            goto cleanup;
+        }
 
         offset += chunk_len;
     }
 
-    mbedtls_sha256_finish(&sha_ctx, digest);
+    size_t hash_length;
+    if (psa_hash_finish(&sha_op, digest, sizeof(digest), &hash_length) != PSA_SUCCESS)
+    {
+        ESP_LOGW(TAG, "SHA-256 finish failed");
+        goto cleanup;
+    }
 
     for (offset = 0; offset < sizeof(digest); ++offset)
     {
@@ -3976,7 +3988,7 @@ static bool ui_compute_partition_sha256_hex(const esp_partition_t* partition, si
     success = true;
 
 cleanup:
-    mbedtls_sha256_free(&sha_ctx);
+    psa_hash_abort(&sha_op);
     free(chunk);
     return success;
 }

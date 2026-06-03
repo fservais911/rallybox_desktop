@@ -7,7 +7,7 @@ documentation: http://www.libpng.org/pub/png/pngdocs.html
 issues: https://github.com/espressif/idf-extra-components/issues
 repository: git://github.com/espressif/idf-extra-components.git
 repository_info:
-  commit_sha: ddcce9612f4a399e48ab4b78c9a6f193bd109291
+  commit_sha: d306e070aa5ef55c9fc22d2d2f19857079c16351
   path: libpng
 url: https://github.com/espressif/idf-extra-components/tree/master/libpng
-version: 1.6.56
+version: 1.6.58

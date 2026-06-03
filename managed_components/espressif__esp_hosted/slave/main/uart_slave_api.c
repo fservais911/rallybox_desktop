@@ -18,6 +18,7 @@
 #include "endian.h"
 #include "interface.h"
 #include "mempool.h"
+#include "memdump.h"
 #include "stats.h"
 #include "esp_idf_version.h"
 #include "esp_hosted_interface.h"
@@ -25,6 +26,15 @@
 #include "esp_hosted_transport_init.h"
 #include "esp_hosted_header.h"
 #include "esp_hosted_coprocessor_fw_ver.h"
+
+#include "slave_util.h"
+#include "slave_config.h"
+#include "mempool.h"
+
+#if H_USE_MEMPOOL
+// memory should be 4 byte aligned for DMA access
+#define MEM_ALIGNMENT_BYTES          4
+#endif
 
 #define HOSTED_UART                CONFIG_ESP_UART_PORT
 #define HOSTED_UART_GPIO_TX        CONFIG_ESP_UART_PIN_TX
@@ -43,13 +53,17 @@
 /**
  * For ESP-IDF v5.5, Building ESP32 with UART Transport can fail due to
  * lack of IRAM space.
- * To reduce IRAM usage, `CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y`
+ * To reduce IRAM usage
+ * - `CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y`
+ * - `CONFIG_RINGBUF_PLACE_ISR_FUNCTIONS_INTO_FLASH=y`
  * should be enabled
  */
-#if CONFIG_IDF_TARGET_ESP32 && !CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH
+#if CONFIG_IDF_TARGET_ESP32 && (!CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH || !CONFIG_RINGBUF_PLACE_ISR_FUNCTIONS_INTO_FLASH)
 #error Building for UART transport can fail due to lack of IRAM space
-#error To free up IRAM, enable Component config --> ESP Ringbuf ---> Place non-ISR ringbuf functions into flash
-#error or uncomment CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y in sdkconfig.defaults.esp32 and regenerate sdkconfig
+#error To free up IRAM, enable Component config --> ESP Ringbuf ---> Place non-ISR ringbuf functions into flash and
+#error Component config --> ESP Ringbuf ---> Place ISR ringbuf functions into flash
+#error or uncomment
+#error CONFIG_RINGBUF_PLACE_FUNCTIONS_INTO_FLASH=y and CONFIG_RINGBUF_PLACE_ISR_FUNCTIONS_INTO_FLASH=y in sdkconfig.defaults.esp32 and regenerate sdkconfig
 #endif
 #endif
 
@@ -102,8 +116,10 @@ if_ops_t if_ops = {
 static interface_handle_t if_handle_g;
 static interface_context_t context;
 
-static struct hosted_mempool * buf_mp_tx_g;
-static struct hosted_mempool * buf_mp_rx_g;
+#if H_USE_MEMPOOL
+static hosted_mempool_t * buf_mp_tx_g;
+static hosted_mempool_t * buf_mp_rx_g;
+#endif
 
 static SemaphoreHandle_t uart_rx_sem;
 static QueueHandle_t uart_rx_queue[MAX_PRIORITY_QUEUES];
@@ -112,11 +128,23 @@ static void uart_rx_task(void* pvParameters);
 
 static inline void h_uart_mempool_create(void)
 {
-	buf_mp_tx_g = hosted_mempool_create(NULL, 0,
-			HOSTED_UART_TX_QUEUE_SIZE, BUFFER_SIZE);
-	buf_mp_rx_g = hosted_mempool_create(NULL, 0,
-			HOSTED_UART_RX_QUEUE_SIZE, BUFFER_SIZE);
-#if CONFIG_ESP_CACHE_MALLOC
+#if H_USE_MEMPOOL
+	hosted_mempool_config_t config = {
+		.pre_allocated_mem = NULL,
+		.pre_allocated_mem_size = 0,
+		.num_blocks = HOSTED_UART_TX_QUEUE_SIZE,
+		.block_size = BUFFER_SIZE,
+		.alignment_in_bytes = MEM_ALIGNMENT_BYTES,
+		.malloc = slave_util_malloc,
+		.calloc = slave_util_calloc,
+		.memset = memset,
+		.free   = free,
+	};
+	buf_mp_tx_g = hosted_mempool_create(&config);
+
+	config.num_blocks = HOSTED_UART_RX_QUEUE_SIZE;
+	buf_mp_rx_g = hosted_mempool_create(&config);
+
 	assert(buf_mp_tx_g);
 	assert(buf_mp_rx_g);
 #endif
@@ -124,28 +152,30 @@ static inline void h_uart_mempool_create(void)
 
 static inline void h_uart_mempool_destroy(void)
 {
+#if H_USE_MEMPOOL
 	hosted_mempool_destroy(buf_mp_tx_g);
 	hosted_mempool_destroy(buf_mp_rx_g);
+#endif
 }
 
 static inline void *h_uart_buffer_tx_alloc(size_t nbytes, uint need_memset)
 {
-	return hosted_mempool_alloc(buf_mp_tx_g, nbytes, need_memset);
+	MEMPOOL_ALLOC(buf_mp_tx_g, nbytes, need_memset);
 }
 
 static inline void h_uart_buffer_tx_free(void *buf)
 {
-	hosted_mempool_free(buf_mp_tx_g, buf);
+	MEMPOOL_FREE(buf_mp_tx_g, buf);
 }
 
 static inline void *h_uart_buffer_rx_alloc(uint need_memset)
 {
-	return hosted_mempool_alloc(buf_mp_rx_g, BUFFER_SIZE, need_memset);
+	MEMPOOL_ALLOC(buf_mp_rx_g, BUFFER_SIZE, need_memset);
 }
 
 static inline void h_uart_buffer_rx_free(void *buf)
 {
-	hosted_mempool_free(buf_mp_rx_g, buf);
+	MEMPOOL_FREE(buf_mp_rx_g, buf);
 }
 
 static void flow_ctrl_task(void* pvParameters)
